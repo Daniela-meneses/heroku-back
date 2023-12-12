@@ -1,214 +1,221 @@
 import fastapi
 import sqlite3
-import hashlib
-from fastapi import Depends, HTTPException, Request, Cookie
-from fastapi.security import HTTPBearer
-from starlette.responses import JSONResponse  # Importa la clase JSONResponse
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from uuid import uuid4 as new_token
+import hashlib
+# Importamos CORS para el acceso
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
+import time
+
+security = HTTPBasic()
+
+securirtyBearer = HTTPBearer()
+
+# Crea la base de datos
+conn = sqlite3.connect("sql/contactos.db")
 
 app = fastapi.FastAPI()
 
-securityBearer = HTTPBearer()
-
+# Permitimos los origenes para conectarse
 origins = [
-    "https://token-front-6cbfb8b8404b.herokuapp.com/"
+    "http://0.0.0.0:8080",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "https://herokufrontendsql-8c522739b4c3.herokuapp.com",
+    "https://herokuflaskfront-60829f087760.herokuapp.com"
 ]
 
+# Agregamos las opciones de origenes, credenciales, métodos y headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
-def md5_hash(text):
-    """Función para calcular el hash MD5 de una cadena"""
-    return hashlib.md5(text.encode()).hexdigest()
-
-# Almacenamiento de sesiones en memoria (no recomendado para producción)
-sessions = {}
-
-class Session:
-    def __init__(self):
-        self.token = None
-
-@app.middleware("http")
-async def add_session(request: Request, call_next):
-    request.state.session = Session()
-    response = await call_next(request)
-    return response
 
 class Contacto(BaseModel):
     email: str
     nombre: str
     telefono: str
 
-def get_connection():
-    """Función para obtener una nueva conexión a la base de datos"""
-    return sqlite3.connect("sql/contactos.db")
+
+# Respuesta de error
+def error_response(mensaje: str, status_code: int):
+    return JSONResponse(content={"mensaje": mensaje}, status_code=status_code)
+
+
+async def cambiar_token_en_login(email):
+    token = str(new_token())
+    c = conn.cursor()
+    c.execute("UPDATE usuarios SET token = ? WHERE username = ?", (token, email))
+    conn.commit()
+    return token
+    
+async def get_user_token(email: str, password_hash: str):
+    c = conn.cursor()
+    c.execute("SELECT token FROM usuarios WHERE username = ? AND password = ?", (email, password_hash))
+    result = c.fetchone()
+    return result
+
+
+@app.get("/token/")
+async def validate_user(credentials: HTTPBasicCredentials = Depends(security)):
+    email = credentials.username
+    password_hash = hashlib.md5(credentials.password.encode()).hexdigest()
+
+    user_token = await get_user_token(email, password_hash)
+
+    if user_token:
+        token = await cambiar_token_en_login(email)
+        response = {"token": token}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciales inválidas",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    return response
+
 
 @app.get("/")
-def auth(credentials: HTTPBearer = Depends(securityBearer), session: Session = Depends()):
-    """Autenticación con token fijo"""
-    token = credentials.credentials
-    connx = get_connection()
-    c = connx.cursor()
-    c.execute('SELECT token FROM usuarios WHERE token = ?', (token,))
-    existe = c.fetchone()
+async def root(credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
+    token = credentialsv.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    if existe is None:
-        raise HTTPException(status_code=401, detail="Not Authenticated")
-    else:
-        # Almacenar el token en la sesión
-        session.token = token
-        # Almacenar la sesión en el diccionario (no recomendado para producción)
-        sessions[token] = session
-        return {"mensaje": "Hola Mundo"}
+    c = conn.cursor()
+    c.execute("SELECT token FROM usuarios WHERE token = ?", (token,))
+    result = c.fetchone()
 
-@app.post("/token", response_class=JSONResponse)  # Usa JSONResponse como clase de respuesta
-def get_token(username: str = fastapi.Form(...), password: str = fastapi.Form(...), session: Session = Depends()):
-    """Obtener token si las credenciales son correctas"""
-    connx = get_connection()
-    c = connx.cursor()
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    hashed_password = md5_hash(password)
+    return {"message": "Token válido"}
 
-    c.execute('SELECT * FROM usuarios WHERE username = ? AND password = ?', (username, hashed_password))
-    user_exists = c.fetchone()
 
-    if user_exists:
-        token = user_exists[2]  # Suponiendo que el token está en la tercera columna de la tabla usuarios
-        # Almacenar el token en la sesión
-        session.token = token
-        # Almacenar la sesión en el diccionario (no recomendado para producción)
-        sessions[token] = session
+# Rutas para las operaciones CRUD
 
-        # Devolver el token (y opcionalmente almacenarlo en el cliente)
-        response = JSONResponse(content={"token": token})
-        # Puedes almacenar el token en una cookie o en el cuerpo de la respuesta, según tus necesidades.
-        # Aquí, se almacena en una cookie con httponly=True para mayor seguridad.
-        response.set_cookie(key="token", value=token, httponly=True)
-        return response
-    else:
-        raise HTTPException(status_code=401, detail="Not Authenticated")
+@app.post("/contactos")
+async def crear_contacto(contacto: Contacto, credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
+    token = credentialsv.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-@app.post("/contactos", dependencies=[Depends(auth)])
-async def crear_contacto(contacto: Contacto):
     """Crea un nuevo contacto."""
     try:
-        # Verifica si el email ya existe en la base de datos
-        connx = get_connection()
-        c = connx.cursor()
-        c.execute('SELECT * FROM contactos WHERE email = ?', (contacto.email,))
-        existing_contact = c.fetchone()
-
-        if existing_contact:
-            raise HTTPException(status_code=400, detail={"mensaje": "El email ya existe"})
-
-        # Inserta el nuevo contacto en la base de datos
+        c = conn.cursor()
         c.execute('INSERT INTO contactos (email, nombre, telefono) VALUES (?, ?, ?)',
                   (contacto.email, contacto.nombre, contacto.telefono))
-        connx.commit()
+        conn.commit()
+        return contacto
+    except sqlite3.Error as e:
+        return error_response("El email ya existe" if "UNIQUE constraint failed" in str(e) else "Error al consultar los datos", 400)
 
-        return {"mensaje": "Contacto insertado correctamente"}
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"mensaje": "Error al consultar los datos"})
+@app.get("/contactos")
+async def obtener_contactos(credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
+    token = credentialsv.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-@app.get("/contactos", dependencies=[Depends(auth)])
-async def obtener_contactos():
     """Obtiene todos los contactos."""
     try:
-        # Consulta todos los contactos de la base de datos y los envía en un JSON
-        connx = get_connection()
-        c = connx.cursor()
-        c.execute('SELECT * FROM contactos')
+        c = conn.cursor()
+        c.execute('SELECT * FROM contactos;')
         response = []
-        for row in c.fetchall():
-            contacto = {
-                "email": row[0],
-                "nombre": row[1],
-                "telefono": row[2]
-            }
+        for row in c:
+            contacto = {"email": row[0], "nombre": row[1], "telefono": row[2]}
             response.append(contacto)
+        if not response:
+            return []
+        return response
+    except sqlite3.Error:
+        return error_response("Error al consultar los datos", 500)
 
-        if response:
-            return response
-        else:
-            raise HTTPException(status_code=202, detail="No hay registros")
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"mensaje": "Error al consultar los datos"})
+@app.get("/contactos/{email}")
+async def obtener_contacto(email: str, credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
+    token = credentialsv.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-@app.get("/contactos/{email}", dependencies=[Depends(auth)])
-async def obtener_contacto(email: str):
     """Obtiene un contacto por su email."""
     try:
-        # Consulta el contacto por su email
-        connx = get_connection()
-        c = connx.cursor()
+        c = conn.cursor()
         c.execute('SELECT * FROM contactos WHERE email = ?', (email,))
-        row = c.fetchone()
+        contacto = None
+        for row in c:
+            contacto = {"email": row[0], "nombre": row[1], "telefono": row[2]}
+        if not contacto:
+            return error_response("El email de no existe", 404)
+        return contacto
+    except sqlite3.Error:
+        return error_response("Error al consultar los datos", 500)
 
-        if row:
-            contacto = {
-                "email": row[0],
-                "nombre": row[1],
-                "telefono": row[2]
-            }
-            return contacto
-        else:
-            raise HTTPException(status_code=404, detail={"mensaje": "El email no existe"})
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"mensaje": "Error al consultar los datos"})
+@app.put("/actualizar_contactos/{email}")
+async def actualizar_contacto(email: str, contacto: Contacto, credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
+    token = credentialsv.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-@app.put("/contactos/{email}", dependencies=[Depends(auth)])
-async def actualizar_contacto(email: str, contacto: Contacto):
     """Actualiza un contacto."""
     try:
-        if contacto.nombre is None or contacto.telefono is None:
-            raise HTTPException(status_code=422, detail="Nombre y teléfono son campos obligatorios")
-
-        # Verifica si el contacto con el email proporcionado existe
-        connx = get_connection()
-        c = connx.cursor()
-        c.execute('SELECT * FROM contactos WHERE email = ?', (email,))
-        existing_contact = c.fetchone()
-
-        if not existing_contact:
-            raise HTTPException(status_code=404, detail={"mensaje": "El ID contacto no existe"})
-
-        # Actualiza el contacto en la base de datos
+        c = conn.cursor()
         c.execute('UPDATE contactos SET nombre = ?, telefono = ? WHERE email = ?',
                   (contacto.nombre, contacto.telefono, email))
-        connx.commit()
+        conn.commit()
+        return contacto
+    except sqlite3.Error:
+        return error_response("El contacto no existe" if not obtener_contacto(email) else "Error al consultar los datos", 400)
 
-        return {"mensaje": "Contacto actualizado correctamente"}
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"mensaje": "Error al consultar o actualizar los datos"})
-
-@app.delete("/contactos/{email}", dependencies=[Depends(auth)])
-async def eliminar_contacto(email: str):
+@app.delete("/contactos/{email}")
+async def eliminar_contacto(email: str, credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
+    token = credentialsv.credentials
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no proporcionado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     """Elimina un contacto."""
     try:
-        # Verifica si el contacto con el email proporcionado existe
-        connx = get_connection()
-        c = connx.cursor()
-        c.execute('SELECT * FROM contactos WHERE email = ?', (email,))
-        existing_contact = c.fetchone()
-
-        if not existing_contact:
-            raise HTTPException(status_code=404, detail={"mensaje": "El email del contacto no existe"})
-
-        # Elimina el contacto de la base de datos
+        c = conn.cursor()
         c.execute('DELETE FROM contactos WHERE email = ?', (email,))
-        connx.commit()
-
-        return {"mensaje": "Contacto borrado correctamente"}
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail={"mensaje": "Error al consultar o eliminar los datos"})
+        conn.commit()
+        if c.rowcount == 0:
+            return error_response("El contacto no existe", 404)
+        return {"mensaje": "Contacto eliminado"}
+    except sqlite3.Error:
+        return error_response("Error al consultar los datos", 500)
