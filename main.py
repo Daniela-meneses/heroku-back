@@ -112,24 +112,6 @@ async def root(credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBea
 
 # Rutas para las operaciones CRUD de Usuarios
 
-@app.post("/usuarios")
-async def registrar_usuario(credentials: HTTPBasicCredentials = Depends(security)):
-    email = credentials.username
-    password_hash = hashlib.md5(credentials.password.encode()).hexdigest()
-
-    # Verifica si el usuario ya existe en la tabla de usuarios
-    c = conn.cursor()
-    c.execute("SELECT * FROM usuarios WHERE username = ?", (email,))
-    existing_user = c.fetchone()
-
-    if existing_user:
-        return error_response("El usuario ya existe", 400)
-
-    # Registra el nuevo usuario
-    c.execute("INSERT INTO usuarios (username, password, token) VALUES (?, ?, ?)", (email, password_hash, ""))
-    conn.commit()
-    return {"mensaje": "Usuario registrado"}
-
 @app.post("/usuarios/registro", response_model=dict)
 async def registrar_usuario(usuario: UsuarioRegistro):
     hashed_password = hashlib.md5(usuario.password.encode()).hexdigest()
