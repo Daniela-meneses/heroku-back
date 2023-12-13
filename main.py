@@ -1,10 +1,8 @@
-import fastapi
 import sqlite3
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 from uuid import uuid4 as new_token
 import hashlib
-# Importamos CORS para el acceso
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
@@ -17,15 +15,11 @@ securirtyBearer = HTTPBearer()
 # Crea la base de datos
 conn = sqlite3.connect("sql/contactos.db")
 
-app = fastapi.FastAPI()
+app = FastAPI()
 
 # Permitimos los origenes para conectarse
 origins = [
-    "http://0.0.0.0:8080",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "https://herokufrontendsql-8c522739b4c3.herokuapp.com",
-    "https://herokuflaskfront-60829f087760.herokuapp.com"
+    "http://127.0.0.1:8080"
 ]
 
 # Agregamos las opciones de origenes, credenciales, métodos y headers
@@ -43,6 +37,15 @@ class Contacto(BaseModel):
     nombre: str
     telefono: str
 
+class UsuarioRegistro(BaseModel):
+    username: str
+    password: str
+
+def validar_token(token):
+    c = conn.cursor()
+    c.execute("SELECT token FROM usuarios WHERE token = ?", (token,))
+    result = c.fetchone()
+    return result
 
 # Respuesta de error
 def error_response(mensaje: str, status_code: int):
@@ -65,13 +68,13 @@ async def get_user_token(email: str, password_hash: str):
 
 @app.get("/token/")
 async def validate_user(credentials: HTTPBasicCredentials = Depends(security)):
-    email = credentials.username
+    username = credentials.username
     password_hash = hashlib.md5(credentials.password.encode()).hexdigest()
 
-    user_token = await get_user_token(email, password_hash)
+    user_token = await get_user_token(username, password_hash)
 
     if user_token:
-        token = await cambiar_token_en_login(email)
+        token = await cambiar_token_en_login(username)
         response = {"token": token}
     else:
         raise HTTPException(
@@ -107,7 +110,70 @@ async def root(credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBea
     return {"message": "Token válido"}
 
 
-# Rutas para las operaciones CRUD
+# Rutas para las operaciones CRUD de Usuarios
+
+@app.post("/usuarios")
+async def registrar_usuario(credentials: HTTPBasicCredentials = Depends(security)):
+    email = credentials.username
+    password_hash = hashlib.md5(credentials.password.encode()).hexdigest()
+
+    # Verifica si el usuario ya existe en la tabla de usuarios
+    c = conn.cursor()
+    c.execute("SELECT * FROM usuarios WHERE username = ?", (email,))
+    existing_user = c.fetchone()
+
+    if existing_user:
+        return error_response("El usuario ya existe", 400)
+
+    # Registra el nuevo usuario
+    c.execute("INSERT INTO usuarios (username, password, token) VALUES (?, ?, ?)", (email, password_hash, ""))
+    conn.commit()
+    return {"mensaje": "Usuario registrado"}
+
+@app.post("/usuarios/registro", response_model=dict)
+async def registrar_usuario(usuario: UsuarioRegistro):
+    hashed_password = hashlib.md5(usuario.password.encode()).hexdigest()
+
+    # Verifica si el usuario ya existe en la tabla de usuarios
+    c = conn.cursor()
+    c.execute("SELECT * FROM usuarios WHERE username = ?", (usuario.username,))
+    existing_user = c.fetchone()
+
+    if existing_user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El usuario ya existe")
+
+    # Registra el nuevo usuario
+    c.execute("INSERT INTO usuarios (username, password, token) VALUES (?, ?, ?)", (usuario.username, hashed_password, ""))
+    conn.commit()
+    return {"mensaje": "Usuario registrado"}
+
+# Ruta para cambiar la contraseña de un usuario
+@app.put("/usuarios/cambiar-contrasena", response_model=dict)
+async def cambiar_contrasena(new_password: str, credentials: HTTPBasicCredentials = Depends(security)):
+    username = credentials.username
+    password_hash = hashlib.md5(credentials.password.encode()).hexdigest()
+
+    # Verifica si el usuario existe en la tabla de usuarios
+    c = conn.cursor()
+    c.execute("SELECT * FROM usuarios WHERE username = ? AND password = ?", (username, password_hash))
+    existing_user = c.fetchone()
+
+    if not existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciales inválidas",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    # Cambia la contraseña del usuario
+    new_password_hash = hashlib.md5(new_password.encode()).hexdigest()
+    c.execute("UPDATE usuarios SET password = ? WHERE username = ?", (new_password_hash, username))
+    conn.commit()
+    return {"mensaje": "Contraseña cambiada exitosamente"}
+
+
+
+# Rutas para las operaciones CRUD de Contactos
 
 @app.post("/contactos")
 async def crear_contacto(contacto: Contacto, credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
@@ -119,7 +185,14 @@ async def crear_contacto(contacto: Contacto, credentialsv: HTTPAuthorizationCred
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    """Crea un nuevo contacto."""
+    # Verifica si el token es válido para el usuario actual
+    if not validar_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         c = conn.cursor()
         c.execute('INSERT INTO contactos (email, nombre, telefono) VALUES (?, ?, ?)',
@@ -140,7 +213,14 @@ async def obtener_contactos(credentialsv: HTTPAuthorizationCredentials = Depends
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    """Obtiene todos los contactos."""
+    # Verifica si el token es válido para el usuario actual
+    if not validar_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         c = conn.cursor()
         c.execute('SELECT * FROM contactos;')
@@ -165,7 +245,14 @@ async def obtener_contacto(email: str, credentialsv: HTTPAuthorizationCredential
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    """Obtiene un contacto por su email."""
+    # Verifica si el token es válido para el usuario actual
+    if not validar_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         c = conn.cursor()
         c.execute('SELECT * FROM contactos WHERE email = ?', (email,))
@@ -179,7 +266,7 @@ async def obtener_contacto(email: str, credentialsv: HTTPAuthorizationCredential
         return error_response("Error al consultar los datos", 500)
 
 
-@app.put("/actualizar_contactos/{email}")
+@app.put("/contactos/{email}")
 async def actualizar_contacto(email: str, contacto: Contacto, credentialsv: HTTPAuthorizationCredentials = Depends(securirtyBearer)):
     token = credentialsv.credentials
     if not token:
@@ -189,7 +276,14 @@ async def actualizar_contacto(email: str, contacto: Contacto, credentialsv: HTTP
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    """Actualiza un contacto."""
+    # Verifica si el token es válido para el usuario actual
+    if not validar_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         c = conn.cursor()
         c.execute('UPDATE contactos SET nombre = ?, telefono = ? WHERE email = ?',
@@ -209,7 +303,14 @@ async def eliminar_contacto(email: str, credentialsv: HTTPAuthorizationCredentia
             detail="Token no proporcionado",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    """Elimina un contacto."""
+
+    # Verifica si el token es válido para el usuario actual
+    if not validar_token(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token no válido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         c = conn.cursor()
         c.execute('DELETE FROM contactos WHERE email = ?', (email,))
