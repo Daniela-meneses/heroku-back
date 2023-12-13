@@ -19,7 +19,7 @@ app = FastAPI()
 
 # Permitimos los origenes para conectarse
 origins = [
-    "http://127.0.0.1:8080"
+    "https://front-heroku-9cc212b137a0.herokuapp.com"
 ]
 
 # Agregamos las opciones de origenes, credenciales, métodos y headers
